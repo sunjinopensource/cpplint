@@ -1134,6 +1134,7 @@ def ParseNolintSuppressions(filename, raw_line, linenum, error):
       linenum: int, the number of the current line.
       error: function, an error handler.
     """
+    # NOLINTNEXTLINE(category)
     if matched := re.search(r"\bNOLINT(NEXTLINE|BEGIN|END)?\b(\([^)]+\))?", raw_line):
         no_lint_type = matched.group(1)
         if no_lint_type == "NEXTLINE":
@@ -1929,6 +1930,10 @@ def Error(filename, linenum, category, confidence, message):
 # Matches standard C++ escape sequences per 2.13.2.3 of the C++ standard.
 _RE_PATTERN_CLEANSE_LINE_ESCAPES = re.compile(r'\\([abfnrtv?"\\\']|\d+|x[0-9a-fA-F]+)')
 # Match a single C style comment on the same line.
+# /\* => /*
+# [^*] => 非*
+# \*(?!/) => *接非/
+# \*/ => */
 _RE_PATTERN_C_COMMENTS = r"/\*(?:[^*]|\*(?!/))*\*/"
 # Matches multi-line C style comments.
 # This RE is a little bit more complicated than one might expect, because we
@@ -2046,6 +2051,7 @@ def CleanseRawStrings(raw_lines):
 
 def FindNextMultiLineCommentStart(lines, lineix):
     """Find the beginning marker for a multiline comment."""
+    """从lines的第lineix行开始，找到第一个以/*开始的行，且该行不含*/，返回该行索引"""
     while lineix < len(lines):
         if lines[lineix].strip().startswith("/*"):
             # Only return this marker if the comment goes beyond this line
@@ -2057,6 +2063,7 @@ def FindNextMultiLineCommentStart(lines, lineix):
 
 def FindNextMultiLineCommentEnd(lines, lineix):
     """We are inside a comment, find the end marker."""
+    """从lines的第lineix行开始，找到第一个以*/结尾的行，返回该行索引"""
     while lineix < len(lines):
         if lines[lineix].strip().endswith("*/"):
             return lineix
@@ -2625,16 +2632,19 @@ def CheckForHeaderGuard(filename, clean_lines, error, cppvar):
     # Because this is silencing a warning for a nonexistent line, we
     # only support the very specific NOLINT(build/header_guard) syntax,
     # and not the general NOLINT or NOLINT(*) syntax.
+    # 任何一行包含 // NOLINT(build/header_guard) 则跳过本检测
     raw_lines = clean_lines.lines_without_raw_strings
     for i in raw_lines:
         if re.search(r"//\s*NOLINT\(build/header_guard\)", i):
             return
 
     # Allow pragma once instead of header guards
+    # 任何一行以#pragma once开头，则通过本检测
     for i in raw_lines:
         if re.search(r"^\s*#pragma\s+once", i):
             return
 
+    # 找到#ifndef、#define的第一次出现，#endif的最后一次出现，保存define的内容和行号
     ifndef = ""
     ifndef_linenum = 0
     define = ""
@@ -4055,6 +4065,11 @@ def CheckForFunctionLengths(filename, clean_lines, linenum, function_state, erro
     of vertical space and comments just to get through a lint check.
     NOLINT *on the last line of a function* disables this check.
 
+    仅检查未缩进的函数，因此类成员不予检查
+    不检查琐碎的函数体，因此带有庞大初始化列表的构造函数可能会被遗漏
+    空白行/注释行不计算在内，以避免鼓励人们为了通过 Lint 检查而删除垂直空格和注释
+    在函数最后一行使用 NOLINT 会禁用此检查
+
     Args:
       filename: The name of the current file.
       clean_lines: A CleansedLines instance containing the file.
@@ -4075,16 +4090,18 @@ def CheckForFunctionLengths(filename, clean_lines, linenum, function_state, erro
         if function_name in {"TEST", "TEST_F"} or not re.match(r"[A-Z_]+$", function_name):
             starting_func = True
 
-    if starting_func:
+    if starting_func:  # 这是一个函数的开始行
         body_found = False
-        for start_linenum in range(linenum, clean_lines.NumLines()):
+        for start_linenum in range(linenum, clean_lines.NumLines()): # 从目标行向后继续遍历
             start_line = lines[start_linenum]
             joined_line += " " + start_line.lstrip()
             if re.search(r"(;|})", start_line):  # Declarations and trivial functions
+                # 该行包含;或}
                 body_found = True
                 break  # ... ignore
-            if re.search(r"{", start_line):
+            if re.search(r"{", start_line):  # 该行包含 {
                 body_found = True
+                # 若干单词符或冒号（function），最后接一个左括号
                 function = re.search(r"((\w|:)*)\(", line).group(1)
                 if re.match(r"TEST", function):  # Handle TEST... macros
                     parameter_regexp = re.search(r"(\(.*\))", joined_line)
@@ -4103,10 +4120,10 @@ def CheckForFunctionLengths(filename, clean_lines, linenum, function_state, erro
                 5,
                 "Lint failed to find start of function body.",
             )
-    elif re.match(r"^\}\s*$", line):  # function end
+    elif re.match(r"^\}\s*$", line):  # function end 行以 } 开头，后接若干空格结尾
         function_state.Check(error, filename, linenum)
         function_state.End()
-    elif not re.match(r"^\s*$", line):
+    elif not re.match(r"^\s*$", line):  # 纯空格的行
         function_state.Count()  # Count non-blank/non-comment lines.
 
 
@@ -7427,7 +7444,7 @@ def ProcessFileData(filename, file_extension, lines, error, extra_check_function
 
     CheckForCopyright(filename, lines, error)
     ProcessGlobalSuppressions(filename, lines)
-    RemoveMultiLineComments(filename, lines, error)
+    RemoveMultiLineComments(filename, lines, error) # 将/*多行内容*/替换为多行/**/
     clean_lines = CleansedLines(lines)
 
     cppvar = None
